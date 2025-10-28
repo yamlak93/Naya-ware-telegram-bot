@@ -1,30 +1,28 @@
+// === IMPORTS ===
+// NOTE: Make sure you have the 'dotenv' package installed if using a local .env file
+require('dotenv').config(); 
 const { Telegraf, Markup } = require('telegraf');
 
-// --- CONFIGURATION ---
-// IMPORTANT: Replace with your actual bot token from BotFather
-// We use 'const' for the raw token value.
-const RAW_TOKEN_INPUT = '8109581729:AAELmvdzbJlEZWH1C549y_iEw6U8cu_NJok'; 
-// IMPORTANT: Replace with your Telegram ID(s) (Admin). All listed IDs will receive notifications.
-const ADMIN_IDS = [987002009, 8338215737];
+// === ENVIRONMENT CONFIG ===
+// Read values from environment variables
+const BOT_TOKEN = process.env.BOT_TOKEN;
+const ADMIN_IDS = process.env.ADMIN_IDS
+    ? process.env.ADMIN_IDS.split(',').map(id => Number(id.trim()))
+    : [];
 
-// CRITICAL FIX: Aggressively strip any non-token character (spaces, newlines, invisible control characters)
-// This ensures only the valid alphanumeric characters, colon, and hyphen remain.
-// By declaring a new 'const BOT_TOKEN', we avoid the "Assignment to constant variable" error
-// that you were seeing if your local file used 'const' on the initial declaration.
-const BOT_TOKEN = RAW_TOKEN_INPUT.replace(/[^\w:-]/g, '').trim(); 
-
-if (BOT_TOKEN === 'YOUR_NEW_BOT_TOKEN_HERE' || BOT_TOKEN.length < 20) {
-    console.error("\n*** ERROR: Bot Token not configured correctly. The token length is suspicious. ***\n");
-    // We will still initialize the bot, but it will likely fail the getMe call (expected for placeholder)
+// === VALIDATION ===
+if (!BOT_TOKEN) {
+    console.error('❌ ERROR: BOT_TOKEN not found. Please add it in .env or environment settings.');
+    // Exit gracefully if the token is missing
+    process.exit(1);
 }
 
-// Initialize the bot with the aggressively cleaned token
+// Initialize the bot
 const bot = new Telegraf(BOT_TOKEN);
 
-// --- MESSAGES & CONSTANTS ---
-
+// === WELCOME MESSAGE ===
 const WELCOME_MESSAGE = `👋 Welcome to *NAYA wear*! ✨
-We are around ledeta flint stone homes.
+We are around Ledeta Flint Stone Homes.
 
 We design elegant, high-quality fashion pieces made just for you.
 Please note: all custom orders take *5–7 days* to complete.
@@ -33,38 +31,38 @@ Please note: all custom orders take *5–7 days* to complete.
 *Payment Confirmation*
 To confirm your order, we kindly ask for a small advance payment.
 Only *200 birr*
-Payment Account Number: \`1000495773268\` Yanet tariku biruk
+Payment Account Number: CBE \`1000495773268\` Yanet Tariku Biruk
 
 Once payment is complete, please use the *Upload Receipt* button to send your bank slip screenshot.
 ---
 
 Click the *Place New Custom Order* button to start your request!`;
 
-// Questions map for easier management
+// === QUESTIONS ===
 const QUESTIONS = {
-    q1: '*Question 1:* What you like to order? (e.g. dress, suit, pants, top, or custom design)',
-    q2: '*Question 2:* 📏 Please share your size or measurements. (small, medium, large, XL, XXL, etc.)',
+    q1: '*Question 1:* What would you like to order? (e.g. dress, suit, pants, top, or custom design)',
+    q2: '*Question 2:* 📏 Please share your size or measurements. (small, medium, large, XL, etc.)',
     q3: '*Question 3:* 🎨 What color or fabric do you prefer?',
     q4: '*Question 4:* 📸 Would you like to send a reference photo? (optional - you can upload it here or type "skip")',
     q5: '*Question 5:* 📞 Please share your phone number so we can confirm your order.'
 };
 
-// --- GLOBAL STATE MANAGEMENT (In-Memory) ---
-// Stores user state during the ordering process
+// === SESSION MANAGEMENT ===
 // { [chatId]: { stage: 'awaiting_q1' | 'awaiting_receipt_phone' | ..., data: {} } }
 let userSessions = {};
-
-// Stores confirmed orders waiting for admin approval
 let orders = {};
 let orderIdCounter = 1;
 
+// === HELPER FUNCTIONS ===
 
-// --- CORE USER FLOW: STATE TRANSITIONS ---
+/**
+ * Safely wraps user-provided text in Markdown inline code blocks.
+ * This prevents special Markdown characters from breaking the formatting.
+ */
+const wrapUserInput = (text) => '`' + String(text).replace(/`/g, "'") + '`';
 
 /**
  * Advances the user's state and asks the next question.
- * @param {object} ctx - Telegraf context object.
- * @param {string} currentStage - The stage the user just completed (e.g., 'q1').
  */
 async function transitionState(ctx, currentStage) {
     const chatId = ctx.chat.id;
@@ -107,29 +105,46 @@ async function transitionState(ctx, currentStage) {
     }
 }
 
-// --- UTILITY FUNCTIONS ---
-
 /**
- * Safely wraps user-provided text in Markdown inline code blocks.
- * This prevents any special Markdown characters (like *, _, [, ], etc.) 
- * in the user's input from breaking the Telegram message formatting, 
- * which caused the "can't parse entities" error.
- * Internal backticks are replaced with single quotes for further safety.
- * @param {string} text - The raw user input.
- * @returns {string} The input wrapped in backticks (e.g., `user input`).
+ * Handles the completion and notification for a payment receipt upload.
  */
-const wrapUserInput = (text) => {
-    return '`' + String(text).replace(/`/g, "'") + '`';
-};
+async function finalizeReceipt(ctx, session, fileId) {
+    const userId = ctx.from.id;
+    const username = ctx.from.username || ctx.from.first_name;
+    const phone = session.receipt_phone;
 
-// --- ADMIN NOTIFICATION AND ORDER COMPLETION ---
+    for (const adminId of ADMIN_IDS) {
+        try {
+            // Sending as plain text (no parse_mode) for robust receipt handling
+            await ctx.telegram.sendPhoto(adminId, fileId, {
+                caption: `💰 NEW PAYMENT RECEIPT RECEIVED 💰
+Customer: ${username} (ID: ${userId})
+Phone Number (for verification): ${phone}
+---
+ACTION REQUIRED: Please check bank account (1000495773268) to verify the 200 birr advance payment.`,
+            });
+        } catch (error) {
+            console.error(`[RECEIPT ERROR] Failed to send receipt photo to admin ID ${adminId}. Reason:`, error.message);
+            const fallbackText = `⚠️ FAILED to display payment receipt photo for user ${username} (ID: ${userId}). 
+Phone: ${phone}. File ID: ${fileId}.`;
+            ctx.telegram.sendMessage(adminId, fallbackText); 
+        }
+    }
+    
+    // Notify user
+    ctx.reply('✅ Receipt uploaded successfully! Thank you for confirming your advance payment.');
+    
+    // Clear receipt session
+    delete userSessions[ctx.chat.id];
+}
 
+
+// === ORDER FINALIZATION (Restored and fixed to use plain text for robustness) ===
 async function finalizeOrder(ctx) {
     const chatId = ctx.chat.id;
     const session = userSessions[chatId];
     const newOrderId = orderIdCounter++;
 
-    // Create the final order object
     const finalOrder = {
         id: newOrderId,
         userId: ctx.from.id,
@@ -137,30 +152,22 @@ async function finalizeOrder(ctx) {
         q1_order: session.q1_order,
         q2_size: session.q2_size,
         q3_color: session.q3_color,
-        q4_photo_file_id: session.q4_photo_file_id || 'N/A', // Photo ID or N/A
+        q4_photo_file_id: session.q4_photo_file_id || 'N/A',
         q5_phone: session.q5_phone,
         status: 'pending'
     };
 
     orders[newOrderId] = finalOrder;
-
-    // Clear user session
     delete userSessions[chatId];
 
     // 1. Confirmation to buyer
     ctx.reply(`✅ *Order Request Sent!* (ID: ${newOrderId})\n
-Thank you for your request. We will review your custom order details and the reference photo (if provided), and confirm it soon.
+Thank you for your request. We will review your order soon.
+*Reminder:* Please ensure you have uploaded your *payment receipt*.`,
+        { parse_mode: 'Markdown' }
+    );
 
-*Reminder:* Please ensure you have used the *Upload Receipt* button to confirm your advance payment.`,
-    { parse_mode: 'Markdown' });
-
-    // 2. Notify Admin with Details and Accept Button
-    // CRITICAL FIX: Removing Markdown parse mode and simplifying the adminMessage
-    // to prevent the "can't parse entities" error that occurs when mixing photos,
-    // custom user input (even if wrapped), and Markdown formatting in the caption/fallback text.
-
-    // Using plain text labels (removed asterisks) but keeping user input wrapped in backticks
-    // for clear separation and displaying file IDs safely.
+    // 2. Admin Notification (CRITICAL: Using plain text for captions/messages for stability)
     const adminMessage = `🚨 NEW CUSTOM ORDER PENDING (ID: ${newOrderId}) 🚨
 Customer: ${ctx.from.first_name} (@${ctx.from.username || 'N/A'})
 User ID: ${finalOrder.userId}
@@ -169,10 +176,9 @@ User ID: ${finalOrder.userId}
 2. Size/Measurements: ${wrapUserInput(finalOrder.q2_size)}
 3. Color/Fabric: ${wrapUserInput(finalOrder.q3_color)}
 5. Phone Number: ${wrapUserInput(finalOrder.q5_phone)}
-Photo ID: ${wrapUserInput(finalOrder.q4_photo_file_id)}`; 
+Photo ID: ${wrapUserInput(finalOrder.q4_photo_file_id)}`;
 
-    const acceptanceKeyboard = {
-        // Explicitly removed parse_mode: 'Markdown' here to force plain text for stability
+    const keyboard = {
         reply_markup: Markup.inlineKeyboard([
             [Markup.button.callback('✅ Accept & Process Order', `accept_order_${newOrderId}`)],
             [Markup.button.callback('❌ Reject Order (Not Implemented)', 'reject_order')]
@@ -181,84 +187,36 @@ Photo ID: ${wrapUserInput(finalOrder.q4_photo_file_id)}`;
 
     const hasPhoto = finalOrder.q4_photo_file_id !== 'N/A' && finalOrder.q4_photo_file_id !== 'Skipped by user (text)';
 
-    // Iterate through all admins to send the notification
     for (const adminId of ADMIN_IDS) {
         if (hasPhoto) {
-            // Send the photo with the full order details and buttons as the caption
             try {
+                // Send photo with plain text caption
                 await ctx.telegram.sendPhoto(adminId, finalOrder.q4_photo_file_id, {
-                    caption: adminMessage, // Full details sent as the caption
-                    ...acceptanceKeyboard // Include the buttons (without parse_mode)
+                    caption: adminMessage,
+                    ...keyboard 
                 });
             } catch (error) {
-                console.error(`Failed to send order photo with details to admin ${adminId}. Falling back to text message:`, error);
-                
-                // Fallback: Send only the text message if photo sending failed
-                // The adminMessage now has plain text structure. We add a warning.
+                console.error(`Failed to send order photo with details to admin ${adminId}. Falling back to text:`, error);
                 const fallbackWarning = `⚠️ Failed to display photo for Order ${newOrderId}. Photo File ID: ${finalOrder.q4_photo_file_id}\n\n`;
-
-                // We must ensure the fallback sendMessage also does NOT use Markdown.
-                await ctx.telegram.sendMessage(adminId, fallbackWarning + adminMessage, acceptanceKeyboard);
+                // Send text fallback (no parse_mode)
+                await ctx.telegram.sendMessage(adminId, fallbackWarning + adminMessage, keyboard);
             }
         } else {
-            // Send the detailed message (text only) - again, without parse_mode
-            ctx.telegram.sendMessage(adminId, adminMessage, acceptanceKeyboard)
+            // Send text only (no parse_mode)
+            ctx.telegram.sendMessage(adminId, adminMessage, keyboard)
                 .catch(err => console.error(`Failed to send admin notification to ${adminId}:`, err));
         }
     }
 }
 
-// Function to handle receipt finalization
-async function finalizeReceipt(ctx, session, fileId) {
-    const userId = ctx.from.id;
-    const username = ctx.from.username || ctx.from.first_name;
-    const phone = session.receipt_phone;
 
-    // Iterate through all admins to send the receipt notification
-    for (const adminId of ADMIN_IDS) {
-        // Send the photo first. We removed parse_mode to prevent parsing errors
-        await ctx.telegram.sendPhoto(adminId, fileId, {
-            // Caption is now simple plain text to avoid parsing issues with user input or special characters.
-            caption: `💰 NEW PAYMENT RECEIPT RECEIVED 💰
-Customer: ${username} (ID: ${userId})
-Phone Number (for verification): ${phone}
----
-ACTION REQUIRED: Please check bank account (1000495773268) to verify the 200 birr advance payment.`,
-            // REMOVED parse_mode: 'Markdown' to prevent the 400 Bad Request error
-        }).catch(error => {
-            // This is the initial error, logged to console.
-            console.error(`[RECEIPT ERROR] Failed to send receipt photo to admin ID ${adminId}. Reason:`, error.message || error);
-            
-            // Fallback message: Do NOT use parse_mode here to prevent crashes from unescaped characters in the error message.
-            const fallbackText = `⚠️ FAILED to display payment receipt photo for user ${username} (ID: ${userId}). 
-Phone: ${phone}. 
-File ID: ${fileId}. 
-(Original Send Error: ${error.message || 'Check bot console'})
----
-ACTION REQUIRED: Please verify the payment manually.`;
+// === BOT HANDLERS ===
 
-            ctx.telegram.sendMessage(adminId, fallbackText) // No parse_mode here!
-                .catch(e => console.error("CRITICAL: Failed to send fallback message to admin:", e));
-        });
-    }
-    
-    // Notify user
-    ctx.reply('✅ Receipt uploaded successfully! Thank you for confirming your advance payment. We will now cross-reference this with your custom order details.');
-    
-    // Clear receipt session
-    delete userSessions[ctx.chat.id];
-}
-
-
-// --- TELEGRAF HANDLERS ---
-
-// 1. Global Error Handler (Prevents bot crash)
+// 1. Global Error Handler
 bot.catch((err, ctx) => {
     console.error(`[Global Bot Error] for ${ctx.updateType}:`, err.message || err);
-    
-    // Send a user-friendly message back to the user's chat
     if (ctx.chat && ctx.chat.id) {
-        ctx.reply('⚠️ Oops! I ran into an unexpected error while processing your request. Please try again or use the main menu buttons.', {
+        ctx.reply('⚠️ Oops! I ran into an unexpected error. Please try again or use the main menu buttons.', {
             parse_mode: 'Markdown'
         }).catch(replyErr => console.error("Failed to send error message back to user:", replyErr));
     }
@@ -267,24 +225,21 @@ bot.catch((err, ctx) => {
 
 // 2. Start command/Main Menu
 bot.start((ctx) => {
-    ctx.reply(WELCOME_MESSAGE,
-    {
+    ctx.reply(WELCOME_MESSAGE, {
         parse_mode: 'Markdown',
         ...Markup.keyboard([
-            ['📦 Place New Custom Order', '🖼️ Upload Receipt'], // Added Upload Receipt button
+            ['📦 Place New Custom Order', '🖼️ Upload Receipt'], 
         ]).resize()
     });
 });
 
-// 3. Handle the "Place New Custom Order" button
+// 3. Handle 'Place New Custom Order'
 bot.hears('📦 Place New Custom Order', (ctx) => {
-    // Start the first question
     userSessions[ctx.chat.id] = { stage: 'awaiting_q1' };
-    ctx.reply('Let’s begin your order request! Please answer the following questions 👇\n\n' + QUESTIONS.q1,
-    { parse_mode: 'Markdown' });
+    ctx.reply(QUESTIONS.q1, { parse_mode: 'Markdown' });
 });
 
-// 4. Handle the "Upload Receipt" button
+// 4. Handle 'Upload Receipt'
 bot.hears('🖼️ Upload Receipt', (ctx) => {
     const chatId = ctx.chat.id;
     userSessions[chatId] = { stage: 'awaiting_receipt_phone' };
@@ -302,7 +257,6 @@ bot.on('callback_query', async (ctx) => {
 
     // Admin accepting an order
     if (data.startsWith('accept_order_')) {
-        // Check if the current user is one of the authorized ADMIN_IDS
         if (!ADMIN_IDS.includes(ctx.from.id)) {
             return ctx.answerCbQuery('❌ Only an authorized admin can accept orders.', true);
         }
@@ -317,7 +271,6 @@ bot.on('callback_query', async (ctx) => {
 
         order.status = 'accepted';
 
-        // Notify customer
         try {
             await ctx.telegram.sendMessage(order.userId,
                 `🎉 *Good News!* Your custom order (#${orderId}) has been **ACCEPTED** by the NAYA wear team and is being processed! We will contact you at ${order.q5_phone} soon.`,
@@ -327,7 +280,6 @@ bot.on('callback_query', async (ctx) => {
             console.error(`Could not notify user ${order.userId}:`, error);
         }
 
-        // Edit the admin's message to reflect acceptance
         await ctx.editMessageText(`✅ **ORDER ACCEPTED** (ID: ${orderId})
 This custom order has been processed.`, { parse_mode: 'Markdown' });
 
@@ -339,26 +291,22 @@ This custom order has been processed.`, { parse_mode: 'Markdown' });
     // User skipping the optional photo step (Q4)
     if (data === 'skip_photo' && session && session.stage === 'awaiting_photo') {
         session.q4_photo_file_id = 'Skipped by user (text)';
-        // Remove the inline keyboard from the message
         await ctx.editMessageReplyMarkup({});
         ctx.answerCbQuery('Photo step skipped.');
-        // Transition to Q5
         await transitionState(ctx, 'photo_received');
         return;
     }
 
-    // Ignore other callback queries
     ctx.answerCbQuery();
 });
 
-
-// 6. Handle Photo Input (Specifically for Q4 or Receipt)
+// 6. Handle Photo Input (Q4 or Receipt)
 bot.on('photo', async (ctx) => {
     const chatId = ctx.chat.id;
     const session = userSessions[chatId];
 
     if (!session) {
-        return ctx.reply("I don't have an active order or receipt session for you. Please use the menu buttons to start.");
+        return ctx.reply("I don't have an active session for you. Please use the menu buttons to start.");
     }
     
     // Get the file_id of the largest photo size
@@ -368,7 +316,6 @@ bot.on('photo', async (ctx) => {
 
     // Handle Receipt Upload Flow
     if (session.stage === 'awaiting_receipt_photo') {
-        // Finalize Receipt will attempt to send the photo to admin
         await finalizeReceipt(ctx, session, fileId); 
         return;
     }
@@ -377,30 +324,27 @@ bot.on('photo', async (ctx) => {
     if (session.stage === 'awaiting_photo') {
         session.q4_photo_file_id = fileId;
         ctx.reply('📸 Reference photo received! Thank you.');
-        // Transition to Q5
         transitionState(ctx, 'photo_received');
         return;
     }
 
-    // Fallback if photo is sent outside of an expected stage
     ctx.reply("Got your image! Please continue answering the questions based on the last prompt.");
 });
 
 
-// 7. Handle Text Input (Q1, Q2, Q3, Q5, and Receipt Phone)
+// 7. Handle Text Input (The CRITICAL FIX)
 bot.on('text', (ctx) => {
     const chatId = ctx.chat.id;
     const text = ctx.message.text;
     const session = userSessions[chatId];
 
     // Ignore menu button presses
-    if (text === '📦 Place New Custom Order' || text === '🖼️ Upload Receipt') {
+    if (['📦 Place New Custom Order', '🖼️ Upload Receipt'].includes(text)) {
         return;
     }
 
-    // Must be in an active session
     if (!session) {
-        return ctx.reply("I don't have an active session for you. Please use the '📦 Place New Custom Order' or '🖼️ Upload Receipt' button to start.");
+        return ctx.reply("I don't have an active session for you. Please use the menu buttons to start.");
     }
 
     // Process the input based on the current stage
@@ -452,16 +396,14 @@ bot.on('text', (ctx) => {
 });
 
 
-// Launch the bot
+// === BOT LAUNCH ===
 bot.launch().then(() => {
-    console.log('NAYA wear ShopBot is running...');
-    
-    // Set command menu
+    console.log('🚀 NAYA Wear Bot is running...');
     bot.telegram.setMyCommands([
         { command: 'start', description: 'Show the welcome message and main menu' },
     ]).catch(err => console.error("Failed to set commands:", err));
 });
 
-// Enable graceful stop
+// Graceful stop
 process.once('SIGINT', () => bot.stop('SIGINT'));
 process.once('SIGTERM', () => bot.stop('SIGTERM'));
